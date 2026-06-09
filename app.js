@@ -6,6 +6,9 @@
   const motionPermissionButton = document.getElementById("motionPermission");
   const calibrateTiltButton = document.getElementById("calibrateTilt");
   const resetTiltButton = document.getElementById("resetTilt");
+  const tiltModeEl = document.getElementById("tiltMode");
+  const tiltRawEl = document.getElementById("tiltRaw");
+  const tiltOffsetEl = document.getElementById("tiltOffset");
 
   const GRID_COLS = 15;
   const GRID_ROWS = 15;
@@ -25,9 +28,11 @@
   let lastTimestamp = 0;
   let manualInput = { x: 0, y: 0 };
   let motionInput = { x: 0, y: 0 };
-  let tiltCalibration = { enabled: false, gamma: 0, beta: 0 };
+  let tiltCalibration = { enabled: false, x: 0, y: 0, z: 0 };
   let hasMotionPermission = false;
+  let hasMotionAccess = false;
   let latestMotion = { gamma: 0, beta: 0, hasReading: false };
+  let latestGravity = { x: 0, y: 0, z: 0, hasReading: false };
   let pointerActive = false;
   let pointerStart = null;
   let ball = { x: 0, y: 0, vx: 0, vy: 0 };
@@ -137,10 +142,59 @@
     return motionInput;
   }
 
+  function formatAxis(value) {
+    return value.toFixed(2);
+  }
+
+  function renderTelemetry() {
+    tiltModeEl.textContent = `傾き補正: ${tiltCalibration.enabled ? "ON" : "OFF"}`;
+    tiltRawEl.textContent =
+      `現在値 g: x ${formatAxis(latestGravity.x)} / y ${formatAxis(latestGravity.y)} / z ${formatAxis(latestGravity.z)}`;
+    tiltOffsetEl.textContent =
+      `補正値 g: x ${formatAxis(tiltCalibration.x)} / y ${formatAxis(tiltCalibration.y)} / z ${formatAxis(tiltCalibration.z)}`;
+  }
+
+  function getScreenAngle() {
+    if (window.screen?.orientation && typeof window.screen.orientation.angle === "number") {
+      return window.screen.orientation.angle;
+    }
+    if (typeof window.orientation === "number") {
+      return window.orientation;
+    }
+    return 0;
+  }
+
+  function rotateToScreen(x, y) {
+    const angle = ((getScreenAngle() % 360) + 360) % 360;
+    if (angle === 90) {
+      return { x: -y, y: x };
+    }
+    if (angle === 180) {
+      return { x: -x, y: -y };
+    }
+    if (angle === 270) {
+      return { x: y, y: -x };
+    }
+    return { x, y };
+  }
+
+  function updateMotionFromGravity(x, y, z) {
+    latestGravity = { x, y, z, hasReading: true };
+    const dx = tiltCalibration.enabled ? x - tiltCalibration.x : x;
+    const dy = tiltCalibration.enabled ? y - tiltCalibration.y : y;
+    const screenVector = rotateToScreen(dx, dy);
+    motionInput = {
+      x: normalizeTilt(screenVector.x / 4.5),
+      y: normalizeTilt(screenVector.y / 4.5),
+    };
+    renderTelemetry();
+  }
+
   function updateMotionInput(gamma, beta) {
     latestMotion = { gamma, beta, hasReading: true };
-    const adjustedGamma = tiltCalibration.enabled ? gamma - tiltCalibration.gamma : gamma;
-    const adjustedBeta = tiltCalibration.enabled ? beta - tiltCalibration.beta : beta;
+    if (latestGravity.hasReading) return;
+    const adjustedGamma = gamma;
+    const adjustedBeta = beta;
     motionInput = {
       x: normalizeTilt(adjustedGamma / 25),
       y: normalizeTilt(adjustedBeta / 25),
@@ -317,23 +371,35 @@
   }
 
   function requestMotionPermission() {
-    if (typeof DeviceOrientationEvent === "undefined") return;
-    const request = DeviceOrientationEvent.requestPermission;
-    if (typeof request !== "function") {
+    const tasks = [];
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      tasks.push(DeviceOrientationEvent.requestPermission());
+    }
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+      tasks.push(DeviceMotionEvent.requestPermission());
+    }
+
+    if (!tasks.length) {
       hasMotionPermission = true;
+      hasMotionAccess = true;
       motionPermissionButton.hidden = true;
+      statusEl.textContent = "端末を傾けて操作できます。";
       return;
     }
-    request()
-      .then((result) => {
-        hasMotionPermission = result === "granted";
+
+    Promise.allSettled(tasks)
+      .then((results) => {
+        const granted = results.some((result) => result.status === "fulfilled" && result.value === "granted");
+        hasMotionPermission = granted;
+        hasMotionAccess = granted;
         motionPermissionButton.hidden = true;
-        statusEl.textContent = hasMotionPermission
+        statusEl.textContent = granted
           ? "端末を傾けて操作できます。"
           : "傾き操作は許可されませんでした。ドラッグ操作を使えます。";
       })
       .catch(() => {
         hasMotionPermission = false;
+        hasMotionAccess = false;
         statusEl.textContent = "傾き操作の許可に失敗しました。ドラッグ操作を使えます。";
       });
   }
@@ -343,7 +409,10 @@
   }
 
   function supportsMotionPermission() {
-    return typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function";
+    return (
+      (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") ||
+      (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function")
+    );
   }
 
   window.addEventListener("deviceorientation", (event) => {
@@ -351,6 +420,14 @@
     const gamma = typeof event.gamma === "number" ? event.gamma : 0;
     const beta = typeof event.beta === "number" ? event.beta : 0;
     updateMotionInput(gamma, beta);
+  });
+
+  window.addEventListener("devicemotion", (event) => {
+    if (!hasMotionAccess && supportsMotionPermission()) return;
+    const gravity = event.accelerationIncludingGravity;
+    if (!gravity) return;
+    if (typeof gravity.x !== "number" || typeof gravity.y !== "number" || typeof gravity.z !== "number") return;
+    updateMotionFromGravity(gravity.x, gravity.y, gravity.z);
   });
 
   canvas.addEventListener("pointerdown", (event) => {
@@ -388,26 +465,34 @@
   });
 
   calibrateTiltButton.addEventListener("click", () => {
-    if (!latestMotion.hasReading) {
-      statusEl.textContent = "傾きの読み取りがまだありません。端末を少し動かしてから試してください。";
+    if (!latestGravity.hasReading) {
+      if (!latestMotion.hasReading) {
+        statusEl.textContent = "傾きの読み取りがまだありません。端末を少し動かしてから試してください。";
+        return;
+      }
+      statusEl.textContent = "この端末では重力値を読めていません。補正が効きにくい場合があります。";
       return;
     }
     tiltCalibration = {
       enabled: true,
-      gamma: latestMotion.gamma,
-      beta: latestMotion.beta,
+      x: latestGravity.x,
+      y: latestGravity.y,
+      z: latestGravity.z,
     };
-    updateMotionInput(latestMotion.gamma, latestMotion.beta);
+    updateMotionFromGravity(latestGravity.x, latestGravity.y, latestGravity.z);
     statusEl.textContent = "現在の姿勢を水平として補正しました。";
   });
 
   resetTiltButton.addEventListener("click", () => {
-    tiltCalibration = { enabled: false, gamma: 0, beta: 0 };
-    if (latestMotion.hasReading) {
+    tiltCalibration = { enabled: false, x: 0, y: 0, z: 0 };
+    if (latestGravity.hasReading) {
+      updateMotionFromGravity(latestGravity.x, latestGravity.y, latestGravity.z);
+    } else if (latestMotion.hasReading) {
       updateMotionInput(latestMotion.gamma, latestMotion.beta);
     } else {
       motionInput = { x: 0, y: 0 };
     }
+    renderTelemetry();
     statusEl.textContent = "傾き補正を中止しました。従来の傾き操作に戻します。";
   });
 
@@ -440,5 +525,6 @@
   }
 
   newGame();
+  renderTelemetry();
   requestAnimationFrame(loop);
 })();
