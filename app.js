@@ -4,6 +4,8 @@
   const statusEl = document.getElementById("status");
   const newGameButton = document.getElementById("newGame");
   const motionPermissionButton = document.getElementById("motionPermission");
+  const calibrateTiltButton = document.getElementById("calibrateTilt");
+  const resetTiltButton = document.getElementById("resetTilt");
 
   const GRID_COLS = 15;
   const GRID_ROWS = 15;
@@ -23,7 +25,9 @@
   let lastTimestamp = 0;
   let manualInput = { x: 0, y: 0 };
   let motionInput = { x: 0, y: 0 };
+  let tiltCalibration = { enabled: false, gamma: 0, beta: 0 };
   let hasMotionPermission = false;
+  let latestMotion = { gamma: 0, beta: 0, hasReading: false };
   let pointerActive = false;
   let pointerStart = null;
   let ball = { x: 0, y: 0, vx: 0, vy: 0 };
@@ -131,6 +135,16 @@
       return manualInput;
     }
     return motionInput;
+  }
+
+  function updateMotionInput(gamma, beta) {
+    latestMotion = { gamma, beta, hasReading: true };
+    const adjustedGamma = tiltCalibration.enabled ? gamma - tiltCalibration.gamma : gamma;
+    const adjustedBeta = tiltCalibration.enabled ? beta - tiltCalibration.beta : beta;
+    motionInput = {
+      x: normalizeTilt(adjustedGamma / 25),
+      y: normalizeTilt(adjustedBeta / 25),
+    };
   }
 
   function cellAtPosition(x, y) {
@@ -336,10 +350,7 @@
     if (!hasMotionPermission && supportsMotionPermission()) return;
     const gamma = typeof event.gamma === "number" ? event.gamma : 0;
     const beta = typeof event.beta === "number" ? event.beta : 0;
-    motionInput = {
-      x: normalizeTilt(gamma / 25),
-      y: normalizeTilt(beta / 25),
-    };
+    updateMotionInput(gamma, beta);
   });
 
   canvas.addEventListener("pointerdown", (event) => {
@@ -374,6 +385,30 @@
     manualInput = { x: 0, y: 0 };
     lastTimestamp = 0;
     newGame();
+  });
+
+  calibrateTiltButton.addEventListener("click", () => {
+    if (!latestMotion.hasReading) {
+      statusEl.textContent = "傾きの読み取りがまだありません。端末を少し動かしてから試してください。";
+      return;
+    }
+    tiltCalibration = {
+      enabled: true,
+      gamma: latestMotion.gamma,
+      beta: latestMotion.beta,
+    };
+    updateMotionInput(latestMotion.gamma, latestMotion.beta);
+    statusEl.textContent = "現在の姿勢を水平として補正しました。";
+  });
+
+  resetTiltButton.addEventListener("click", () => {
+    tiltCalibration = { enabled: false, gamma: 0, beta: 0 };
+    if (latestMotion.hasReading) {
+      updateMotionInput(latestMotion.gamma, latestMotion.beta);
+    } else {
+      motionInput = { x: 0, y: 0 };
+    }
+    statusEl.textContent = "傾き補正を中止しました。従来の傾き操作に戻します。";
   });
 
   if (motionPermissionButton) {
